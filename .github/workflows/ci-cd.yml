@@ -1,0 +1,362 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Release type'
+        type: choice
+        options:
+          - none
+          - patch
+          - minor
+          - major
+        default: none
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  # ── Test Phase ──────────────────────────────────────────────
+  ci:
+    name: Check banned APIs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Check banned C APIs
+        run: sh ./ci/banned.h.sh
+
+  style_checker:
+    name: Check C style
+    runs-on: ubuntu-latest
+    container: citus/stylechecker:no-py
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set safe directory for git
+        run: git config --global --add safe.directory ${GITHUB_WORKSPACE}
+
+      - name: Check C style
+        run: citus_indent --check
+
+  docs:
+    name: Check docs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Build docs
+        uses: ammaraskar/sphinx-action@0.4
+        with:
+          docs-folder: "docs/"
+
+      - name: Set Version String From .git
+        run: make version
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Check that docs are up to date
+        run: |
+          cat Dockerfile ci/Dockerfile.docs.template > ci/Dockerfile.docs
+      - name: Build and run docs check
+        uses: docker/build-push-action@v7.0.0
+        with:
+          context: .
+          file: ci/Dockerfile.docs
+          load: true
+          tags: test-docs
+          cache-from: type=gha,scope=docs-check
+          cache-to: type=gha,mode=max,scope=docs-check
+      - name: Run docs check
+        run: docker run test-docs
+
+  build_test_images:
+    name: Build test images (PG ${{ matrix.PGVERSION }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        PGVERSION: [15, 16]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set Version String From .git
+        run: make version
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Build pgcopydb image
+        uses: docker/build-push-action@v7.0.0
+        with:
+          context: .
+          load: true
+          tags: pgcopydb
+          build-args: PGVERSION=${{ matrix.PGVERSION }}
+          cache-from: type=gha,scope=pgcopydb-pg${{ matrix.PGVERSION }}
+          cache-to: type=gha,mode=max,scope=pgcopydb-pg${{ matrix.PGVERSION }}
+
+      - name: Build pagila image
+        working-directory: tests
+        run: docker build --build-arg PGVERSION=${{ matrix.PGVERSION }} -t pagila -f Dockerfile.pagila .
+
+      - name: Save images to tar (zstd)
+        run: docker save pgcopydb pagila | zstd -T0 -o /tmp/images-pg${{ matrix.PGVERSION }}.tar.zst
+
+      - name: Upload images artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: docker-images-pg${{ matrix.PGVERSION }}
+          path: /tmp/images-pg${{ matrix.PGVERSION }}.tar.zst
+          retention-days: 1
+
+  run_tests:
+    name: ${{ matrix.batch }} (PG ${{ matrix.PGVERSION }})
+    runs-on: ubuntu-latest
+    needs: build_test_images
+    strategy:
+      fail-fast: false
+      matrix:
+        PGVERSION: [15, 16]
+        batch: [core, misc, cdc, follow]
+        include:
+          - batch: core
+            tests: pagila pagila-multi-steps pagila-standby unit
+          - batch: misc
+            tests: blobs filtering extensions timescaledb
+          - batch: cdc
+            tests: cdc-low-level cdc-test-decoding cdc-endpos-between-transaction cdc-wal2json
+          - batch: follow
+            tests: follow-wal2json follow-9.6 follow-data-only endpos-in-multi-wal-txn
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set Version String From .git
+        run: make version
+
+      - name: Download images artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: docker-images-pg${{ matrix.PGVERSION }}
+          path: /tmp
+
+      - name: Load Docker images
+        run: zstd -d /tmp/images-pg${{ matrix.PGVERSION }}.tar.zst --stdout | docker load
+
+      - name: Run tests
+        timeout-minutes: 30
+        env:
+          PGVERSION: ${{ matrix.PGVERSION }}
+          TESTS: ${{ matrix.tests }}
+        run: |
+          failed=""
+          for t in $TESTS; do
+            echo "::group::test $t"
+            docker volume create "$t"
+            test_status=0
+            if make -C "tests/$t"; then
+              echo "✓ $t passed"
+            else
+              test_status=$?
+            fi
+            make -C "tests/$t" down 2>/dev/null || true
+            if [ "$test_status" -ne 0 ]; then
+              echo "::error::✗ $t failed"
+              failed="$failed $t"
+            fi
+            echo "::endgroup::"
+          done
+          if [ -n "$failed" ]; then
+            echo "Failed tests:$failed"
+            exit 1
+          fi
+
+  sanitizer:
+    name: ASAN/UBSAN
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set Version String From .git
+        run: make version
+
+      - name: Install build dependencies
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] \
+            https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            postgresql-server-dev-16 libpq-dev libgc-dev libncurses-dev \
+            libselinux1-dev libxslt1-dev libpam0g-dev libkrb5-dev libreadline-dev \
+            liblz4-dev libzstd-dev libssl-dev libxml2-dev libedit-dev
+
+      - name: Build with ASAN/UBSAN
+        env:
+          SAN_FLAGS: >-
+            -fsanitize=address,undefined
+            -fno-omit-frame-pointer
+            -fno-sanitize-recover=undefined
+        run: |
+          make -C src/bin/lib/sqlite clean sqlite3.o
+          make -C src/bin/pgcopydb clean
+          make -C src/bin/pgcopydb \
+            CFLAGS="$SAN_FLAGS" LDFLAGS="$SAN_FLAGS" \
+            -j$(nproc)
+
+      - name: Smoke test
+        run: ./src/bin/pgcopydb/pgcopydb --version
+
+  # ── Build Phase (push to main auto-publishes latest, amd64 only) ────────
+  build:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    needs: [ci, style_checker, docs, run_tests, sanitizer]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set Version String From .git
+        run: make version
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.1
+        with:
+          cosign-release: 'v2.4.3'
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Log into registry
+        uses: docker/login-action@v4.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7.0.0
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Sign image
+        run: cosign sign --yes "$REGISTRY/$IMAGE_NAME:latest"
+
+  # ── Release Phase (manual trigger, requires approval) ────────
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: [ci, style_checker, docs, run_tests, sanitizer]
+    if: github.ref == 'refs/heads/main' && inputs.release != 'none' && inputs.release != ''
+    environment: production
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: version
+        env:
+          BUMP: ${{ inputs.release }}
+        run: |
+          LATEST=$(git tag --sort=-v:refname --list 'v*.*.*' | head -1)
+          if [ -z "$LATEST" ]; then
+            LATEST="v0.17.0"
+          fi
+          MAJOR=$(echo "$LATEST" | sed 's/v//' | cut -d. -f1)
+          MINOR=$(echo "$LATEST" | sed 's/v//' | cut -d. -f2)
+          PATCH=$(echo "$LATEST" | sed 's/v//' | cut -d. -f3)
+          case "$BUMP" in
+            major) MAJOR=$((MAJOR + 1)); MINOR=0; PATCH=0 ;;
+            minor) MINOR=$((MINOR + 1)); PATCH=0 ;;
+            patch) PATCH=$((PATCH + 1)) ;;
+          esac
+          echo "tag=v${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+          echo "version=${MAJOR}.${MINOR}.${PATCH}" >> "$GITHUB_OUTPUT"
+
+      - name: Create local tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: git tag "$TAG"
+
+      - name: Set Version String From .git
+        run: make version
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v4.1.1
+        with:
+          cosign-release: 'v2.4.3'
+
+      - name: Setup Docker buildx
+        uses: docker/setup-buildx-action@v4.0.0
+
+      - name: Log into registry
+        uses: docker/login-action@v4.0.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7.0.0
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Sign image
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          cosign sign --yes "$REGISTRY/$IMAGE_NAME:$VERSION"
+          cosign sign --yes "$REGISTRY/$IMAGE_NAME:latest"
+
+      - name: Push tag
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: git push origin "$TAG"
