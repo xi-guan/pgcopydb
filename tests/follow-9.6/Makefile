@@ -1,7 +1,7 @@
 # Copyright (c) 2021 The PostgreSQL Global Development Group.
 # Licensed under the PostgreSQL License.
 
-PGVERSION ?= 9.6
+PGVERSION := 9.6
 export PGVERSION
 
 COMPOSE_EXIT = --exit-code-from=test --abort-on-container-exit

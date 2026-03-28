@@ -32,10 +32,10 @@ done
 # switch to another WAL file, to test that our streaming solution can follow
 # WAL file changes.
 #
-switchwal='select pg_switch_xlog()'
-
-if [ "${PGVERSION}" == "10" ]
+if [ "${PGVERSION}" == "9.5" ] || [ "${PGVERSION}" == "9.6" ]
 then
+    switchwal='select pg_switch_xlog()'
+else
     switchwal='select pg_switch_wal()'
 fi
 

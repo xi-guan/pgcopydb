@@ -270,6 +270,8 @@ extern GUC srcSettings95[];
 extern GUC srcSettings[];
 extern GUC dstSettings[];
 
+void copydb_set_maintenance_work_mem(const char *value);
+
 /* copydb.h */
 void cli_copy_prepare_specs(CopyDataSpec *copySpecs, CopyDataSection section);
 

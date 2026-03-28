@@ -1,28 +1,26 @@
 # syntax=docker/dockerfile:latest
 # Define a base image with all our build dependencies.
-FROM --platform=${TARGETPLATFORM} debian:11-slim AS build
+FROM debian:12-slim AS build
 
-# multi-arch
-ARG TARGETPLATFORM
-ARG TARGETOS
 ARG TARGETARCH
 ARG PGVERSION=16
 
-RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt update \
-  && apt install -qqy --no-install-recommends \
+RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt-get update \
+  && apt-get install -qqy --no-install-recommends \
 	curl \
 	ca-certificates \
 	gnupg
 
-RUN curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
-RUN echo "deb http://apt.postgresql.org/pub/repos/apt bullseye-pgdg main ${PGVERSION}" > /etc/apt/sources.list.d/pgdg.list
+RUN install -d /etc/apt/keyrings \
+  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  | gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
+RUN echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main ${PGVERSION}" > /etc/apt/sources.list.d/pgdg.list
 
-RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt update \
-  && apt install -qqy --no-install-recommends \
+RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt-get update \
+  && apt-get install -qqy --no-install-recommends \
     libncurses-dev \
     libxml2-dev \
     sudo \
-    valgrind \
     build-essential \
     libedit-dev \
     libgc-dev \
@@ -38,18 +36,10 @@ RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt update \
     libssl-dev \
     libxslt1-dev \
     libzstd-dev \
-    lsof \
-    psmisc \
-    gdb \
-    strace \
-    tmux \
-    watch \
     make \
     openssl \
     postgresql-server-dev-${PGVERSION} \
     psutils \
-    tmux \
-    watch \
     zlib1g-dev
 
 WORKDIR /usr/src/pgcopydb
@@ -85,28 +75,27 @@ RUN make -s clean && make -s -j$(nproc) install
 COPY tests tests
 
 # Now the "run" image, as small as possible
-FROM --platform=${TARGETPLATFORM} debian:11-slim AS run
+FROM debian:12-slim AS run
 
-# multi-arch
-ARG TARGETPLATFORM
-ARG TARGETOS
 ARG TARGETARCH
 ARG PGVERSION=16
 
 # used to configure Github Packages
 LABEL org.opencontainers.image.source=https://github.com/dimitri/pgcopydb
 
-RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt update \
-  && apt install -qqy --no-install-recommends \
+RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt-get update \
+  && apt-get install -qqy --no-install-recommends \
 	curl \
 	ca-certificates \
 	gnupg
 
-RUN curl https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -
-RUN echo "deb http://apt.postgresql.org/pub/repos/apt bullseye-pgdg main ${PGVERSION}" > /etc/apt/sources.list.d/pgdg.list
+RUN install -d /etc/apt/keyrings \
+  && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+  | gpg --dearmor -o /etc/apt/keyrings/pgdg.gpg
+RUN echo "deb [signed-by=/etc/apt/keyrings/pgdg.gpg] http://apt.postgresql.org/pub/repos/apt bookworm-pgdg main ${PGVERSION}" > /etc/apt/sources.list.d/pgdg.list
 
-RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt update \
-  && apt install -qqy --no-install-suggests --no-install-recommends \
+RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt-get update \
+  && apt-get install -qqy --no-install-suggests --no-install-recommends \
     sudo \
     passwd \
     ca-certificates \
@@ -120,7 +109,7 @@ RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt update \
     postgresql-common \
     postgresql-client-${PGVERSION} \
     postgresql-client-common \
-    && apt clean \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 RUN useradd -rm -d /var/lib/postgres -s /bin/bash -g postgres -G sudo docker

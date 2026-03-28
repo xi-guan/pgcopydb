@@ -93,6 +93,8 @@ typedef struct CopyDBOptions
 	/* pgcopydb stream receive|transform|apply --endpos %X%X */
 	uint64_t endpos;
 
+	char maintenanceWorkMem[BUFSIZE];
+
 	char filterFileName[MAXPGPATH];
 	char requirementsFileName[MAXPGPATH];
 } CopyDBOptions;

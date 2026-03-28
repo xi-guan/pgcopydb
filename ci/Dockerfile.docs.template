@@ -8,7 +8,7 @@
 # across different Dockerfiles for now, we need to prepend a copy of the
 # original Dockerfile in the beginning of this file.
 
-FROM --platform=${TARGETPLATFORM} build
+FROM build
 RUN dpkg --add-architecture ${TARGETARCH:-arm64} && apt update \
   && apt install -qqy --no-install-suggests --no-install-recommends \
     git \

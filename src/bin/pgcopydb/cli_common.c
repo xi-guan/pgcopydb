@@ -286,6 +286,21 @@ cli_copydb_getenv(CopyDBOptions *options)
 		++errors;
 	}
 
+	if (env_exists(PGCOPYDB_MAINTENANCE_WORK_MEM))
+	{
+		if (!get_env_copy(PGCOPYDB_MAINTENANCE_WORK_MEM,
+						  options->maintenanceWorkMem,
+						  sizeof(options->maintenanceWorkMem)))
+		{
+			/* errors have already been logged */
+			++errors;
+		}
+		else
+		{
+			copydb_set_maintenance_work_mem(options->maintenanceWorkMem);
+		}
+	}
+
 	/* check --plugin environment variable */
 	if (env_exists(PGCOPYDB_OUTPUT_PLUGIN))
 	{

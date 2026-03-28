@@ -24,6 +24,9 @@
 #include "summary.h"
 
 
+static char maintenanceWorkMemValue[BUFSIZE] = DEFAULT_MAINTENANCE_WORK_MEM;
+
+
 /* Postgres 9.5 does not have idle_in_transaction_session_timeout */
 GUC srcSettings95[] = {
 	COMMON_GUC_SETTINGS,
@@ -44,7 +47,7 @@ GUC srcSettings[] = {
  */
 GUC dstSettings[] = {
 	COMMON_GUC_SETTINGS,
-	{ "maintenance_work_mem", "'1 GB'" },
+	{ "maintenance_work_mem", maintenanceWorkMemValue },
 	{ "synchronous_commit", "'off'" },
 	{ "statement_timeout", "0" },
 	{ "lock_timeout", "0" },
@@ -84,6 +87,28 @@ KeyVal connStringDefaults = {
 		"60"
 	}
 };
+
+
+/*
+ * copydb_set_maintenance_work_mem overrides the default maintenance_work_mem
+ * value used in dstSettings[]. The value must include single quotes for SET,
+ * e.g. "'2 GB'". If the input lacks quotes, they are added automatically.
+ */
+void
+copydb_set_maintenance_work_mem(const char *value)
+{
+	if (value[0] == '\'')
+	{
+		strlcpy(maintenanceWorkMemValue, value, sizeof(maintenanceWorkMemValue));
+	}
+	else
+	{
+		sformat(maintenanceWorkMemValue, sizeof(maintenanceWorkMemValue),
+				"'%s'", value);
+	}
+
+	log_info("Using maintenance_work_mem = %s", maintenanceWorkMemValue);
+}
 
 
 /*
